@@ -808,12 +808,22 @@ function Invoke-TransPosixTouchDirect {
 function Enable-TransPosixCommandGroup {
     param([string]$Group,[string[]]$Names,[string]$ModuleFile)
     $enabled=if($Group-eq 'Core'){$script:TransPosixCoreEnabled}else{$script:TransPosixOptionalEnabled};if($enabled){return}
-    foreach($name in $Names) {
-        $existing=Get-Command $name -ErrorAction SilentlyContinue | Select-Object -First 1
-        if($existing){Write-Warning "[TransPosix] '$name' conflicts with an existing $($existing.CommandType) command. Disabling TransPosix commands will reveal the original command again."}
-        elseif($name-eq 'date'-and (Get-Command Get-Date -ErrorAction SilentlyContinue)) {
-            Write-Warning "[TransPosix] 'date' implicitly resolves to the Get-Date cmdlet through PowerShell's default Get- verb. Disabling TransPosix commands will reveal that original behavior again."
+    # Command discovery reads the global preference, even inside a module function.
+    $autoLoadingVariable=Get-Variable PSModuleAutoLoadingPreference -Scope Global -ErrorAction SilentlyContinue
+    if($null-ne $autoLoadingVariable){$autoLoadingValue=$autoLoadingVariable.Value}
+    try {
+        $global:PSModuleAutoLoadingPreference='None'
+        foreach($name in $Names) {
+            $existing=Get-Command $name -ErrorAction SilentlyContinue | Select-Object -First 1
+            if($existing){Write-Warning "[TransPosix] '$name' conflicts with an existing $($existing.CommandType) command. Disabling TransPosix commands will reveal the original command again."}
+            elseif($name-eq 'date'-and (Get-Command Get-Date -ErrorAction SilentlyContinue)) {
+                Write-Warning "[TransPosix] 'date' implicitly resolves to the Get-Date cmdlet through PowerShell's default Get- verb. Disabling TransPosix commands will reveal that original behavior again."
+            }
         }
+    }
+    finally {
+        if($null-ne $autoLoadingVariable){$global:PSModuleAutoLoadingPreference=$autoLoadingValue}
+        else{Remove-Variable PSModuleAutoLoadingPreference -Scope Global}
     }
     foreach($name in $Names){$alias=Get-Alias $name -ErrorAction SilentlyContinue;if($alias-and -not $script:TransPosixSavedAliases.ContainsKey($name)){$script:TransPosixSavedAliases[$name]=[pscustomobject]@{Definition=$alias.Definition;Description=$alias.Description;Options=$alias.Options}}}
     $module=Import-Module (Join-Path $PSScriptRoot $ModuleFile) -Global -Force -DisableNameChecking -PassThru
