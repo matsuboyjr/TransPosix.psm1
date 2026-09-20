@@ -27,7 +27,20 @@ function New-TransPosixTranslation {
 }
 
 function Get-TransPosixCommandHelp {
-    param([Parameter(Mandatory=$true)][ValidateSet('ls','cat','cp','mv','rm','mkdir','grep','find','head','tail','sort','date','tac','uniq','wc','which','touch')][string]$CommandName)
+    param([Parameter(Mandatory=$true)][ValidateSet('ls','cat','cp','mv','rm','mkdir','grep','find','head','tail','sort','date','tac','uniq','wc','which','touch','diff')][string]$CommandName)
+    if($CommandName -eq 'diff') { return @'
+[TransPosix] diff - supported subset
+Usage: diff [-i|--ignore-case] FILE1 FILE2
+Pipeline: PIPELINE | diff [-i|--ignore-case] FILE1 -
+          PIPELINE | diff [-i|--ignore-case] - FILE2
+          PIPELINE | diff [-i|--ignore-case] FILE1
+- means stdin; omitting FILE2 requires pipeline input. Empty pipelines are valid.
+diff - - is unsupported. Files use Get-Content defaults and literal paths.
+Returns InputObject and SideIndicator (<= first input, => second input).
+Uses Compare-Object -CaseSensitive by default; -i/--ignore-case omits -CaseSensitive.
+Bridges file paths and Get-Content pipelines to native Compare-Object results.
+No unified output, directory comparison, whitespace options, or GNU exit statuses.
+'@ }
     if($CommandName -eq 'ls') { return @'
 [TransPosix] ls - supported subset
 Usage: ls [-a|--all] [-R|--recursive] [PATH ...]
@@ -197,6 +210,29 @@ function Test-TransPosixUnsafeSyntax {
         if ($c -eq '&' -and $i + 1 -lt $CommandLine.Length -and $CommandLine[$i + 1] -eq '&') { return $true }
     }
     return $false
+}
+
+function ConvertFrom-PosixDiff {
+    param([string]$Source, [string[]]$Arguments)
+    if($null -eq $Arguments){$Arguments=@()}
+    $paths=@();$unsupported=@();$end=$false;$ignoreCase=$false
+    if(@($Arguments).Count -eq 1 -and @('-h','--help') -contains $Arguments[0]) {
+        return New-TransPosixTranslation $Source 'diff' '# TransPosix diff help' @() @() @() ([pscustomobject]@{Operation='ShowHelp';CommandName='diff'})
+    }
+    foreach($arg in $Arguments) {
+        if(-not $end -and $arg -eq '--'){$end=$true;continue}
+        if(-not $end -and @('-i','--ignore-case') -ccontains $arg){$ignoreCase=$true;continue}
+        if(-not $end -and $arg.StartsWith('-') -and $arg -ne '-'){$unsupported+="[TransPosix] Unsupported diff option: $arg";continue}
+        $paths+=$arg
+    }
+    if($paths.Count -lt 1 -or $paths.Count -gt 2){$unsupported+='[TransPosix] diff requires FILE1 and optionally FILE2 (pipeline input when omitted).'}
+    if($paths.Count -eq 1){$paths+='-'}
+    if(@($paths | Where-Object {$_ -eq '-'}).Count -gt 1){$unsupported+='[TransPosix] diff - - is unsupported: one stdin cannot supply two independent inputs.'}
+    $expressions=@($paths | ForEach-Object {if($_ -eq '-'){'$pipelineInput'}else{'@(Get-Content -LiteralPath '+(ConvertTo-TransPosixLiteral $_)+')'}})
+    $code='Compare-Object -ReferenceObject '+($expressions -join ' -DifferenceObject ')
+    if(-not $ignoreCase){$code+=' -CaseSensitive'}
+    $plan=if($unsupported.Count){$null}else{[pscustomobject]@{Operation='Diff';Paths=[string[]]$paths;IgnoreCase=$ignoreCase}}
+    New-TransPosixTranslation $Source 'diff' $code @('The first operand is the reference (<=); the second is the difference (=>). Stdin is buffered before comparison.', 'File paths are read with Get-Content, bridging POSIX-style calls to native PowerShell object comparison.', 'TransPosix adds -CaseSensitive by default; -i/--ignore-case uses the native case-insensitive default. Empty sides return the same InputObject and SideIndicator properties.') @('[TransPosix] This is not GNU diff: no unified output, edit script, or GNU exit status semantics.') $unsupported $plan
 }
 
 function ConvertFrom-PosixGrep {
@@ -486,6 +522,7 @@ function ConvertFrom-PosixCommand {
     if ($tokens.Count -eq 0) { throw '[TransPosix] The command line is empty.' }
     $args = if ($tokens.Count -gt 1) { @($tokens[1..($tokens.Count - 1)]) } else { @() }
     switch -CaseSensitive ($tokens[0]) {
+        'diff' { ConvertFrom-PosixDiff $CommandLine $args }
         'ls' { ConvertFrom-PosixCoreFileCommand $CommandLine ls $args }
         'cat' { ConvertFrom-PosixCoreFileCommand $CommandLine cat $args }
         'cp' { ConvertFrom-PosixCoreFileCommand $CommandLine cp $args }
@@ -519,6 +556,16 @@ function Get-TransPosixDepth {
 function Invoke-TransPosixPlan {
     param($Plan, [object[]]$InputObject, [bool]$HasPipeline)
     if ($Plan.Operation -eq 'ShowHelp') { return Get-TransPosixCommandHelp $Plan.CommandName }
+    if ($Plan.Operation -eq 'Diff') {
+        if($Plan.Paths -contains '-' -and -not $HasPipeline){throw '[TransPosix] diff requires pipeline input when an operand is - or FILE2 is omitted.'}
+        $left=@(if($Plan.Paths[0] -eq '-'){$InputObject}else{Get-Content -LiteralPath $Plan.Paths[0] -ErrorAction Stop})
+        $right=@(if($Plan.Paths[1] -eq '-'){$InputObject}else{Get-Content -LiteralPath $Plan.Paths[1] -ErrorAction Stop})
+        # Compare-Object rejects empty collections on Windows PowerShell 5.1.
+        if($left.Count -eq 0){foreach($item in $right){[pscustomobject]@{InputObject=$item;SideIndicator='=>'}};return}
+        if($right.Count -eq 0){foreach($item in $left){[pscustomobject]@{InputObject=$item;SideIndicator='<='}};return}
+        Compare-Object -ReferenceObject $left -DifferenceObject $right -CaseSensitive:(-not $Plan.IgnoreCase)
+        return
+    }
     if ($Plan.Operation -eq 'Ls') {
         $paths=if(@($Plan.Paths).Count){$Plan.Paths}else{@('.')};$params=@{LiteralPath=$paths}
         if($Plan.All){$params.Force=$true};if($Plan.Recursive){$params.Recurse=$true}
@@ -663,6 +710,30 @@ function Invoke-TransPosixCoreFileDirect {
     if(-not $t.CanExecute){throw($t.Unsupported-join ' ')}
     Format-TransPosixTranslation $t $script:TransPosixMode;Wait-TransPosixExplainExecution $script:TransPosixMode;Invoke-TransPosixPlan $t.ExecutionPlan $InputObject $HasPipeline
 }
+function Invoke-TransPosixDiffDirect {
+    [CmdletBinding()]param(
+        [Parameter(Position=0,ValueFromRemainingArguments=$true)][string[]]$Path,
+        [Alias('i','ignore-case','-ignore-case')][switch]$IgnoreCase,
+        [Parameter(ValueFromPipeline=$true)][AllowNull()][AllowEmptyString()][object]$InputObject,
+        [Alias('h')][switch]$Help)
+    begin {
+        $all=New-Object System.Collections.ArrayList
+        # ExpectingInput remains true even if the upstream command emits no rows.
+        $has=$MyInvocation.ExpectingInput
+    }
+    process {if($PSBoundParameters.ContainsKey('InputObject')){$has=$true;[void]$all.Add($InputObject)}}
+    end {
+        if($Help){Get-TransPosixCommandHelp diff;return}
+        $arguments=@();if($IgnoreCase){$arguments+='-i'};if($null -ne $Path){$arguments+=@($Path)}
+        $t=ConvertFrom-PosixDiff 'diff (direct PowerShell invocation)' $arguments
+        if(-not $t.CanExecute){throw ($t.Unsupported -join ' ')}
+        if($t.ExecutionPlan.Operation -eq 'ShowHelp'){Get-TransPosixCommandHelp diff;return}
+        Format-TransPosixTranslation $t $script:TransPosixMode
+        Wait-TransPosixExplainExecution $script:TransPosixMode
+        Invoke-TransPosixPlan $t.ExecutionPlan $all.ToArray() $has
+    }
+}
+
 function Invoke-TransPosixLsDirect {
     [CmdletBinding()]param([Parameter(Position=0)][string[]]$Path,[Alias('a')][switch]$All,[Alias('R')][switch]$Recursive,[Alias('h')][switch]$Help)
     if($Help){Get-TransPosixCommandHelp ls;return};$args=@();if($All){$args+='-a'};if($Recursive){$args+='-R'};if($Path){$args+=@($Path)};Invoke-TransPosixCoreFileDirect ls $args @() $false
@@ -832,8 +903,8 @@ function Enable-TransPosixCommandGroup {
 function Enable-TransPosixCoreCommands {
     [CmdletBinding(SupportsShouldProcess=$true)]param()
     if($PSCmdlet.ShouldProcess('global session','Enable TransPosix core commands')){
-        Enable-TransPosixCommandGroup Core @('ls','cat','cp','mv','rm','mkdir','sort','date') 'TransPosix.CoreCommands.psm1'
-        $map=@{ls='TransPosixLsCommand';cat='TransPosixCatCommand';cp='TransPosixCpCommand';mv='TransPosixMvCommand';rm='TransPosixRmCommand';sort='TransPosixSortCommand'}
+        Enable-TransPosixCommandGroup Core @('ls','cat','cp','mv','rm','mkdir','sort','date','diff') 'TransPosix.CoreCommands.psm1'
+        $map=@{ls='TransPosixLsCommand';cat='TransPosixCatCommand';cp='TransPosixCpCommand';mv='TransPosixMvCommand';rm='TransPosixRmCommand';sort='TransPosixSortCommand';diff='TransPosixDiffCommand'}
         foreach($entry in $map.GetEnumerator()){$options=[System.Management.Automation.ScopedItemOptions]::None;if($script:TransPosixSavedAliases.ContainsKey($entry.Key)){$options=$script:TransPosixSavedAliases[$entry.Key].Options};Set-Alias -Name $entry.Key -Value $entry.Value -Scope Global -Option $options -Force}
     }
 }
@@ -849,7 +920,7 @@ function Disable-TransPosixCommands {
         $hadCore=$script:TransPosixCoreEnabled-or $null-ne ($loadedCommandModules|Where-Object Name -eq 'TransPosix.CoreCommands'|Select-Object -First 1)-or $script:TransPosixSavedAliases.Count-gt 0
         if($script:TransPosixSavedAliases.Count-eq 0){$core=$loadedCommandModules|Where-Object Name -eq 'TransPosix.CoreCommands'|Select-Object -First 1;if($core){$script:TransPosixSavedAliases=& $core {$script:OriginalAliases}}}
         foreach($commandModule in $loadedCommandModules){Remove-Module $commandModule -Force -ErrorAction SilentlyContinue}
-        if($hadCore){foreach($name in @('ls','cat','cp','mv','rm','sort')){if($script:TransPosixSavedAliases.ContainsKey($name)){$saved=$script:TransPosixSavedAliases[$name];Set-Alias -Name $name -Value $saved.Definition -Description $saved.Description -Option $saved.Options -Scope Global -Force}else{Remove-Item -LiteralPath ("Alias:"+$name) -Force -ErrorAction SilentlyContinue}}}
+        if($hadCore){foreach($name in @('ls','cat','cp','mv','rm','sort','diff')){if($script:TransPosixSavedAliases.ContainsKey($name)){$saved=$script:TransPosixSavedAliases[$name];Set-Alias -Name $name -Value $saved.Definition -Description $saved.Description -Option $saved.Options -Scope Global -Force}else{Remove-Item -LiteralPath ("Alias:"+$name) -Force -ErrorAction SilentlyContinue}}}
         $script:TransPosixSavedAliases=@{};$script:TransPosixCoreModule=$null;$script:TransPosixOptionalModule=$null;$script:TransPosixCoreEnabled=$false;$script:TransPosixOptionalEnabled=$false
     }
 }

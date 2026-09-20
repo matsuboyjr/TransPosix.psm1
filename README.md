@@ -2,7 +2,7 @@
 
 TransPosix is an educational translation module for users moving from familiar POSIX/GNU commands to native PowerShell cmdlets and the object pipeline. It is not a compatibility layer or a shell, and it does not depend on external binaries, WSL, Git Bash, or Cygwin.
 
-The current implementation includes a deliberately limited parser, translation and display infrastructure, safe structured `ExecutionPlan` execution, and support for `ls`, `cat`, `cp`, `mv`, `rm`, `mkdir`, `grep`, `find`, `head`, `tail`, `sort`, `date`, `tac`, `uniq`, `wc`, `which`, and `touch`. It targets Windows PowerShell 5.1 on Windows and PowerShell 7.4 or later on Windows, Linux, and macOS. It does not use PowerShell 7-only syntax.
+The current implementation includes a deliberately limited parser, translation and display infrastructure, safe structured `ExecutionPlan` execution, and support for `ls`, `cat`, `cp`, `mv`, `rm`, `mkdir`, `grep`, `find`, `head`, `tail`, `sort`, `date`, `tac`, `uniq`, `wc`, `which`, `touch`, and `diff`. It targets Windows PowerShell 5.1 on Windows and PowerShell 7.4 or later on Windows, Linux, and macOS. It does not use PowerShell 7-only syntax.
 
 ## Installation and basic use
 
@@ -29,7 +29,7 @@ For a more familiar POSIX-style command-line editing experience, you may also wa
 Set-PSReadLineOption -EditMode Emacs
 ```
 
-POSIX-style command names are not registered during import. `Enable-TransPosixOptionalCommands` adds names that do not normally replace PowerShell aliases: `grep`, `find`, `head`, `tail`, `tac`, `uniq`, `wc`, `which`, and `touch`. `Enable-TransPosixCoreCommands` explicitly replaces familiar names such as `ls`, `cat`, `cp`, `mv`, `rm`, `mkdir`, and `sort`, and also adds `date`. `Disable-TransPosixCommands` removes both groups and restores the original commands. Core commands are an explicit learning aid and may change existing interactive habits or scripts.
+POSIX-style command names are not registered during import. `Enable-TransPosixOptionalCommands` adds names that do not normally replace PowerShell aliases: `grep`, `find`, `head`, `tail`, `tac`, `uniq`, `wc`, `which`, and `touch`. `Enable-TransPosixCoreCommands` explicitly replaces familiar names such as `ls`, `cat`, `cp`, `mv`, `rm`, `mkdir`, `sort`, and `diff`, and also adds `date`. `Disable-TransPosixCommands` removes both groups and restores the original commands. Core commands are an explicit learning aid and may change existing interactive habits or scripts.
 
 Direct `grep` and `find` calls also honor the current display mode. `Invoke-TransPosix -TranslateOnly` never waits for input because it does not execute anything.
 
@@ -57,6 +57,7 @@ Collision warnings begin with `[TransPosix]` so their source is clear.
 - `rm`: `-r/-R/--recursive` and `-f/--force`; force ignores missing literal paths.
 - `mkdir`: `-p/--parents`; PowerShell already creates missing parents, while `-p` also accepts existing directories.
 - `sort`: `-r`, `-n`, `-u`, single-field `-k N`, and single-character `-t CHAR`. Direct object pipelines may specify a property, such as `Get-Process | sort CPU`.
+- `diff`: compare two files, or one file and buffered pipeline input (see below). Case-sensitive by default; `-i/--ignore-case` ignores case. Enabling Core replaces the standard `diff` alias; disabling restores it.
 - `date`: UTC, the documented format tokens, and the limited expressions `now`, `today`, `tomorrow`, `yesterday`, `N days ago`, and `N hours ago`.
 
 ### Commands enabled by `Enable-TransPosixOptionalCommands`
@@ -95,6 +96,42 @@ Get-ChildItem -LiteralPath '.' -Recurse -File |
 PowerShell pipelines carry objects, not only text. `Select-String` is the primary grep-like cmdlet; `Get-ChildItem` and `Where-Object` cover common find-like tasks. Tasks commonly written with `awk` are naturally expressed with `ForEach-Object`, `Where-Object`, and `Select-Object`. Structured data should generally be addressed by property name rather than textual column position.
 
 `Select-String` is normally case-insensitive, which differs from POSIX grep. TransPosix makes ordinary `grep` case-sensitive and uses the native case-insensitive behavior for `grep -i`. It treats `find -name` as explicitly case-sensitive and `-iname` as explicitly case-insensitive.
+
+### Comparing text with diff
+
+```powershell
+Enable-TransPosixCoreCommands
+Set-TransPosixMode Quiet
+diff file1.txt file2.txt
+Get-Content file2.txt | diff file1.txt -
+Get-Content file1.txt | diff - file2.txt
+Get-Content file2.txt | diff file1.txt
+cat file2.txt | diff file1.txt
+diff -i file1.txt file2.txt
+Get-Content file2.txt | diff --ignore-case file1.txt
+```
+
+`-` means stdin. Omitting the second operand is equivalent to specifying `-` there. Both forms require a connected pipeline; a connected pipeline emitting zero lines is a valid empty input. `diff - -` is explicitly rejected. With two file operands, the files are compared regardless of pipeline input. Missing files produce terminating errors. File paths are literal; use `--` in the string API to end option parsing.
+
+Results retain `Compare-Object`'s `InputObject` and `SideIndicator` properties: `<=` means first input only, `=>` means second input only. Results can be piped to `Where-Object` or `Select-Object`. Identical inputs produce no output. Empty sides produce objects with the same properties. The entire input is buffered in memory.
+
+The standard PowerShell `diff` alias points directly to `Compare-Object`: passing file paths compares those path strings, not file contents. TransPosix provides a small compatibility bridge from the familiar POSIX entry point to `Get-Content`, pipelines, and native `Compare-Object` results. Its purpose is to teach that model, not reproduce GNU diff's output or algorithms. Both the native `cat` alias for `Get-Content` and the TransPosix Core `cat` command work as pipeline sources.
+
+By default, `diff file1.txt file2.txt` maps conceptually to:
+
+```powershell
+Compare-Object (Get-Content file1.txt) (Get-Content file2.txt) -CaseSensitive
+# With the native cat alias, the same operation is:
+Compare-Object (cat file1.txt) (cat file2.txt) -CaseSensitive
+```
+
+`-i` and `--ignore-case` both omit `-CaseSensitive`, using PowerShell's native case-insensitive comparison. These rules apply equally to file operands and all stdin forms. For example, `Foo` and `foo` differ by default and compare equal with either option. Results remain usable as objects:
+
+```powershell
+diff file1.txt file2.txt | Where-Object SideIndicator -eq '=>'
+```
+
+Only `-i/--ignore-case` is supported as a comparison option. Unified output (`-u/--unified`), directory comparison (`-r`), whitespace preprocessing (`-w/-b`), and GNU exit status conventions are unsupported. Native `Compare-Object` line matching is retained. Encoding follows `Get-Content`; for UTF-8 without a BOM on Windows PowerShell 5.1, use `Get-Content -Encoding UTF8` for pipeline input or save file operands with a UTF-8 BOM. The string API also supports `Invoke-TransPosix 'diff -i file1.txt file2.txt'`; stdin forms use the direct command.
 
 ## Security and unsupported syntax
 

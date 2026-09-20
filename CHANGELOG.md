@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Added Core `diff` using native `Get-Content` and `Compare-Object`, with structured results, explicit `-` stdin on either side, and an omitted-second-operand pipeline shorthand.
+- Added empty-input handling, validation, help, translation, alias restoration, and diff regression coverage.
+- Made `diff` case-sensitive by default with `Compare-Object -CaseSensitive`; `-i/--ignore-case` uses native case-insensitive comparison for files and every stdin form. Documented its bridge to native PowerShell pipelines and object results.
+
 ## 0.4.0
 
 - Split session enablement into independent core and optional command groups.
